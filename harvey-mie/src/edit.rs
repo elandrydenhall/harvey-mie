@@ -68,6 +68,49 @@ pub fn load_pin(jpeg: &[u8]) -> Result<Loaded, SaveError> {
     }
 }
 
+/// How the sibling `.jpg.json` compares with the trailer that was loaded.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SidecarState {
+    Match,
+    Differ { json_len: usize },
+    Missing,
+    JsonOnly { json_len: usize },
+    Neither,
+}
+
+/// Read the JPEG trailer and compare it with the sibling `.jpg.json`.
+///
+/// The loaded text is always the trailer. A missing sidecar is not an error.
+/// A sidecar that is not the same bytes, including one that is not UTF-8, differs.
+pub fn inspect_pin(jpeg: &Path) -> Result<(Loaded, SidecarState), SaveError> {
+    let bytes = fs::read(jpeg).map_err(SaveError::Io)?;
+    let loaded = load_pin(&bytes)?;
+    let sidecar = match fs::read(sibling_json(jpeg)) {
+        Ok(file) => Some(file),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+        Err(err) => return Err(SaveError::Io(err)),
+    };
+    let state = sidecar_state(
+        loaded.has_pin.then_some(loaded.text.as_str()),
+        sidecar.as_deref(),
+    );
+    Ok((loaded, state))
+}
+
+fn sidecar_state(pin_text: Option<&str>, sidecar: Option<&[u8]>) -> SidecarState {
+    match (pin_text, sidecar) {
+        (Some(text), Some(json)) if json == text.as_bytes() => SidecarState::Match,
+        (Some(_), Some(json)) => SidecarState::Differ {
+            json_len: json.len(),
+        },
+        (Some(_), None) => SidecarState::Missing,
+        (None, Some(json)) => SidecarState::JsonOnly {
+            json_len: json.len(),
+        },
+        (None, None) => SidecarState::Neither,
+    }
+}
+
 /// `photo.jpg` -> `photo.jpg.json`
 pub fn sibling_json(jpeg: &Path) -> PathBuf {
     let mut name = jpeg.file_name().unwrap_or_default().to_os_string();
@@ -231,6 +274,78 @@ mod tests {
         let err = commit_verified(&jpeg, original, b"not-a-trailer", b"{}").unwrap_err();
         assert!(matches!(err, SaveError::RoundTrip));
         assert_eq!(fs::read(&jpeg).unwrap(), original);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inspect_reports_a_matching_sidecar() {
+        let dir = scratch("match");
+        let jpeg = dir.join("a.jpg");
+        let text = "{\"a\":1}";
+        fs::write(&jpeg, mie::embed(HOST, text.as_bytes())).unwrap();
+        fs::write(sibling_json(&jpeg), text.as_bytes()).unwrap();
+        let (loaded, state) = inspect_pin(&jpeg).unwrap();
+        assert_eq!(loaded.text, text);
+        assert!(loaded.has_pin);
+        assert_eq!(state, SidecarState::Match);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inspect_reports_a_different_sidecar() {
+        let dir = scratch("differ");
+        let jpeg = dir.join("a.jpg");
+        let trailer = "{\"a\":1}";
+        let json = "{\"a\":2,\"b\":3}";
+        fs::write(&jpeg, mie::embed(HOST, trailer.as_bytes())).unwrap();
+        fs::write(sibling_json(&jpeg), json.as_bytes()).unwrap();
+        let (loaded, state) = inspect_pin(&jpeg).unwrap();
+        assert_eq!(loaded.text, trailer);
+        assert_eq!(
+            state,
+            SidecarState::Differ {
+                json_len: json.len()
+            }
+        );
+        fs::write(sibling_json(&jpeg), [0xff, 0xfe]).unwrap();
+        let (loaded, state) = inspect_pin(&jpeg).unwrap();
+        assert_eq!(loaded.text, trailer);
+        assert_eq!(state, SidecarState::Differ { json_len: 2 });
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inspect_reports_a_missing_sidecar() {
+        let dir = scratch("missing");
+        let jpeg = dir.join("a.jpg");
+        let text = "{\"a\":1}";
+        fs::write(&jpeg, mie::embed(HOST, text.as_bytes())).unwrap();
+        let (loaded, state) = inspect_pin(&jpeg).unwrap();
+        assert_eq!(loaded.text, text);
+        assert_eq!(state, SidecarState::Missing);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inspect_does_not_load_a_sidecar_without_a_trailer() {
+        let dir = scratch("jsononly");
+        let jpeg = dir.join("a.jpg");
+        fs::write(&jpeg, HOST).unwrap();
+        let json = "{\"only\":true}";
+        fs::write(sibling_json(&jpeg), json.as_bytes()).unwrap();
+        let (loaded, state) = inspect_pin(&jpeg).unwrap();
+        assert!(!loaded.has_pin);
+        assert!(loaded.text.is_empty());
+        assert_eq!(
+            state,
+            SidecarState::JsonOnly {
+                json_len: json.len()
+            }
+        );
+        fs::remove_file(sibling_json(&jpeg)).unwrap();
+        let (loaded, state) = inspect_pin(&jpeg).unwrap();
+        assert!(!loaded.has_pin);
+        assert_eq!(state, SidecarState::Neither);
         let _ = fs::remove_dir_all(&dir);
     }
 

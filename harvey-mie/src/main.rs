@@ -269,17 +269,13 @@ impl PinEditor {
         };
         self.preview = decode_preview(ctx, &bytes, name);
         self.selected = Some(name.to_owned());
-        match edit::load_pin(&bytes) {
-            Ok(loaded) => {
+        match edit::inspect_pin(&path) {
+            Ok((loaded, sidecar)) => {
                 self.editable = true;
                 self.has_pin = loaded.has_pin;
                 self.original = loaded.text.clone();
                 self.text = loaded.text;
-                self.status = if loaded.has_pin {
-                    format!("{name}  ·  {} bytes", self.text.len())
-                } else {
-                    format!("{name}  ·  no Pin trailer. Valid JSON creates one.")
-                };
+                self.status = pin_status(name, &self.text, sidecar);
             }
             Err(edit::SaveError::NotUtf8) => {
                 self.editable = false;
@@ -317,6 +313,23 @@ impl eframe::App for PinEditor {
             .show(ui, |ui| self.file_list(ui));
         egui::CentralPanel::default().show(ui, |ui| self.editor(ui));
         self.confirm(ui);
+    }
+}
+
+fn pin_status(name: &str, text: &str, sidecar: edit::SidecarState) -> String {
+    let n = text.len();
+    match sidecar {
+        edit::SidecarState::Match => format!("{name}  ·  {n} bytes  ·  matches {name}.json"),
+        edit::SidecarState::Differ { json_len } => format!(
+            "{name}  ·  showing the JPEG trailer, {n} bytes. {name}.json differs, {json_len} bytes."
+        ),
+        edit::SidecarState::Missing => format!("{name}  ·  {n} bytes  ·  no {name}.json yet"),
+        edit::SidecarState::JsonOnly { json_len } => format!(
+            "{name}  ·  no Pin trailer. {name}.json has {json_len} bytes and was not loaded."
+        ),
+        edit::SidecarState::Neither => {
+            format!("{name}  ·  no Pin trailer. Valid JSON creates one.")
+        }
     }
 }
 
