@@ -1,0 +1,7 @@
+[package]
+name = "mie"
+version = "0.1.0"
+edition = "2021"
+description = "Locate, strip, and append one MIE trailer: a big-endian 0MIE group with a UTF-8 Pin element and an empty zmie signature."
+license = "Artistic-1.0-Perl OR GPL-3.0-only"
+repository = "https://github.com/elandrydenhall/harvey-mie"
